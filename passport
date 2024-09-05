@@ -1,0 +1,504 @@
+#!/usr/bin/perl -w
+
+
+#
+# This file is part of passport.
+#
+# (C) 2024 by Sebastian Krahmer, sebastian [dot] krahmer [at] gmail [dot] com
+#
+# passport is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# passport is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with passport. If not, see <http://www.gnu.org/licenses/>.
+#
+
+#
+#
+#
+
+# The SSL verification is intentionally SSL_VERIFY_NONE, but can be changed.
+# However, for testing with different IPs that do not necessarily match with
+# the domain name as per to fool SNI observers, this is quite useful.
+
+
+use Digest;
+use IO::Socket;
+use IO::Socket::SSL;
+
+$TUNSERV_PEER	= 'google.com';		# IP or FQDN
+$TUNSERV	= 'cable.ua5v.com';	# what gets into "Host:" header
+$SNI		= 'google.hk';
+$TUNNELTIME	= 60;			# When will the tunnel be closed by remote (in seconds)
+$NUM_RIDS	= 6;			# amount of predictable routing IDs to obtain
+$HASHSECRET	= 'mysecret';		# Make the time based tunnel ID a bit more unpredictable
+
+
+my $cfg = {
+	port => undef,
+	host => undef,
+	mode => undef,
+	routing_id => undef,
+	routing_id_set => {},
+	tunnel_id => undef
+};
+
+banner();
+
+
+usage() if (!defined $ARGV[0]);
+
+# obtain routing id from server
+if ($ARGV[0] eq "-new") {
+	$cfg->{mode} = 1;
+	usage() if (scalar @ARGV != 2);
+	$cfg->{port} = $ARGV[1];
+	$cfg->{tunnel_id} = get_rnd_id();
+
+# generate time based tunnel ID on startup and re-use these
+} elsif ($ARGV[0] eq "-tnew") {
+	$cfg->{mode} = 1;
+	usage() if (scalar @ARGV != 2);
+	$cfg->{port} = $ARGV[1];
+
+# use provided tunnel and routing ID
+} elsif ($ARGV[0] eq "-connect") {
+	$cfg->{mode} = 2;
+	usage() if (scalar @ARGV != 5);
+	$cfg->{host} = $ARGV[1];
+	$cfg->{port} = $ARGV[2];
+	$cfg->{routing_id} = $ARGV[3];
+	$cfg->{tunnel_id} = $ARGV[4];
+
+# generate time based tunnel ID and guess routing ID
+} elsif ($ARGV[0] eq "-tconnect") {
+	$cfg->{mode} = 2;
+	usage() if (scalar @ARGV != 3);
+	$cfg->{host} = $ARGV[1];
+	$cfg->{port} = $ARGV[2];
+} else {
+	usage();
+}
+
+
+
+if ($cfg->{mode} == 1) {
+	create_new_tunnel();
+} else {
+	connect_tunnel();
+}
+exit;
+
+
+#### For requests, expecting a reply like:
+#
+# Expecting reply like:
+#
+# HTTP/1.1 101 Switching Protocols
+# Upgrade: websocket
+# Connection: Upgrade
+# Sec-WebSocket-Accept: ...
+# Sec-WebSocket-Protocol: fido.cable
+# X-Cable-Routing-Id: 112233
+# Date: ...
+# Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+
+
+sub create_new_tunnel
+{
+
+	# use stdin/stdout for debugging tunnel if needed
+	#open(IO, "+</dev/tty");
+
+	my $local_lpeer = IO::Socket::INET->new(
+		LocalAddr => '127.0.0.1',
+		LocalPort => $cfg->{port},
+		Type => SOCK_STREAM,
+		ReuseAddr => 1,
+		ReusePort => 1,
+		Listen => 1
+	) or die $!;
+
+	print "[**] Listening on $cfg->{port}, waiting for connect ...\n";
+	my $local_peer = $local_lpeer->accept() or die $!;
+
+	for (;;) {
+
+		$cfg->{tunnel_id} = get_time_id() if (!defined $cfg->{tunnel_id});
+		my $ws_key = Digest->new("MD5")->add(get_rnd_id())->b64digest() or die $!;
+
+		my $new_req=<<EON;
+GET /cable/new/$cfg->{tunnel_id} HTTP/1.1\r
+Host: $TUNSERV\r
+Upgrade: websocket\r
+Connection: Upgrade\r
+Sec-WebSocket-Key: $ws_key\r
+Sec-WebSocket-Protocol: fido.cable\r
+Sec-WebSocket-Version: 13\r
+\r
+EON
+
+		my $peer = IO::Socket::SSL->new(
+			PeerHost => $TUNSERV_PEER,
+			PeerPort => '443',
+			SSL_verify_mode => SSL_VERIFY_NONE,
+			SSL_hostname => $SNI
+		) or die $!;
+
+		print ">>>\n", $new_req;
+		print $peer $new_req;
+
+		my $reply = "";
+		while ($reply !~ /\r\n\r\n$/) {
+			$reply .= <$peer>;
+		}
+
+		print "<<<\n", $reply;
+
+		$reply =~ /X-Cable-Routing-Id:\s+([a-fA-F0-9]+)/;
+		$cfg->{routing_id} = $1;
+
+		if (!defined $cfg->{routing_id}) {
+			$peer->close();
+			sleep 1;
+			next;
+		}
+
+		print "\nTunnel-ID: $cfg->{tunnel_id}\nRouting-ID: $cfg->{routing_id}\n";
+
+		$peer->blocking(0);
+
+		#mux($peer, \*IO);
+		mux($peer, $local_peer);
+
+		$peer->close();
+	}
+}
+
+
+sub connect_tunnel
+{
+	my $local_peer = IO::Socket::INET->new(
+		PeerAddr => $cfg->{host},
+		PeerPort => $cfg->{port},
+		Type => SOCK_STREAM,
+	) or die $!;
+
+	if (!defined $cfg->{routing_id}) {
+
+		# globally fills $cfg->{routing_id_set}
+		get_rids();
+	} else {
+
+		# use single fixed routing ID as given on cmdline
+		$cfg->{routing_id_set} = {
+			$cfg->{routing_id} => 1
+		};
+	}
+
+	# for debugging
+	#open(IO, "+</dev/tty");
+
+	for (;;) {
+
+		foreach my $rid (keys %{$cfg->{routing_id_set}}) {
+
+			$cfg->{tunnel_id} = get_time_id() if (!defined $cfg->{tunnel_id});
+			my $ws_key = Digest->new("MD5")->add(get_rnd_id())->b64digest() or die $!;
+
+			my $connect_req=<<EOC;
+GET /cable/connect/$rid/$cfg->{tunnel_id} HTTP/1.1\r
+Host: $TUNSERV\r
+Upgrade: websocket\r
+Connection: Upgrade\r
+Sec-WebSocket-Key: $ws_key\r
+Sec-WebSocket-Protocol: fido.cable\r
+Sec-WebSocket-Version: 13\r
+\r
+EOC
+			my $peer = IO::Socket::SSL->new(
+				PeerHost => $TUNSERV_PEER,
+				PeerPort => '443',
+				SSL_verify_mode => SSL_VERIFY_NONE,
+				SSL_hostname => $SNI
+			) or die $!;
+
+			print ">>>\n", $connect_req;
+			print $peer $connect_req;
+
+			my $reply = "";
+			while ($reply !~ /\r\n\r\n$/) {
+				$reply .= <$peer>;
+			}
+
+			print "<<<\n", $reply;
+
+			if ($reply !~ /^HTTP\/1\.1 101 Switching Protocols\r\n/) {
+				$peer->close();
+				sleep 1;
+				next;
+			}
+
+			$peer->blocking(0);
+
+			#mux($peer, \*IO);
+			mux($peer, $local_peer);
+
+			$peer->close();
+		}
+
+		# if routing ID was passed on cmdline, exit
+		last if (scalar(keys %{$cfg->{routing_id_set}}) == 1);
+	}
+}
+
+# obtain the current set of routing IDs
+sub get_rids
+{
+	print "[**] Obtaining valid routing IDs ...\n";
+
+	for (;scalar(keys %{$cfg->{routing_id_set}}) < $NUM_RIDS;) {
+		my $tid = get_rnd_id();
+		my $ws_key = Digest->new("MD5")->add(get_rnd_id())->b64digest() or die $!;
+
+		my $new_req=<<EON;
+GET /cable/new/$tid HTTP/1.1\r
+Host: $TUNSERV\r
+Upgrade: websocket\r
+Connection: Upgrade\r
+Sec-WebSocket-Key: $ws_key\r
+Sec-WebSocket-Protocol: fido.cable\r
+Sec-WebSocket-Version: 13\r
+\r
+EON
+
+		my $peer = IO::Socket::SSL->new(
+			PeerHost => $TUNSERV_PEER,
+			PeerPort => '443',
+			SSL_verify_mode => SSL_VERIFY_NONE,
+			SSL_hostname => $SNI
+		) or die $!;
+
+		print ">>>\n", $new_req;
+		print $peer $new_req;
+
+		my $reply = "";
+		while ($reply !~ /\r\n\r\n$/) {
+			$reply .= <$peer>;
+		}
+
+		print "<<<\n", $reply;
+
+		$reply =~ /X-Cable-Routing-Id:\s+([a-fA-F0-9]+)/;
+		my $rid = $1;
+
+		$peer->close();
+
+		next if (!defined $rid);
+
+		print "[+] New Routing-ID: $rid\n";
+
+		$cfg->{routing_id_set}->{$rid} = 1;
+
+		sleep 1;
+	}
+}
+
+
+sub mux
+{
+	my ($ssl_peer, $fd) = @_;
+
+	my ($vec1, $vec2) = (undef, undef);
+	my @peer_out = ();
+	my $local_out = "";
+
+	# rset
+	vec($vec1, fileno($ssl_peer), 1) = 1;
+	vec($vec1, fileno($fd), 1) = 1;
+
+	for (;;) {
+
+		# wset
+		$vec2 = undef;
+		vec($vec2, fileno($ssl_peer), 1) = 1 if (scalar @peer_out > 0);
+		vec($vec2, fileno($fd), 1) = 1 if (length $local_out > 0);
+
+		my $nready = select(my $rset = $vec1, my $wset = $vec2, undef, $TUNNELTIME);
+
+		# push PING frame
+		if ($nready == 0) {
+			#print "DBG: select TO, adding PING\n";
+			#push @peer_out, ping_ws();
+			#next;
+			last;
+		}
+
+		if (defined $rset && vec($rset, fileno($ssl_peer), 1) == 1) {
+
+			# see man IO::Socket:SSL for reading entire frames and ->pending
+			my $n = $ssl_peer->sysread(my $buf, 16384);
+			if (defined $n) {
+				if ($n == 0) {
+					warn "error=$! SSL=$SSL_ERROR";
+					last;
+				}
+				do {
+					my $pkt = unpack_ws(\$buf);	# will shorten \$buf ref if concatenated
+					$local_out .= $pkt;
+				} while (length($buf) > 0);
+
+				#logdump($buf);
+			}
+		}
+
+		if (defined $rset && vec($rset, fileno($fd), 1) == 1) {
+			my $n = sysread($fd, my $buf, 125);
+			if (defined $n) {
+				die $! if ($n == 0);			# hard error if local socket closes
+				push @peer_out, pack_ws($buf);
+			}
+		}
+
+		if (defined $wset && vec($wset, fileno($ssl_peer), 1) == 1) {
+			if (scalar @peer_out > 0) {
+				my $frame = shift @peer_out;
+				my $n = $ssl_peer->syswrite($frame);
+				if (!defined $n || $n != length($frame)) {
+					warn "error=$! SSL=$SSL_ERROR";
+					last;
+				}
+			}
+		}
+
+		if (defined $wset && vec($wset, fileno($fd), 1) == 1) {
+			if (length $local_out > 0) {
+				my $n = syswrite($fd, $local_out, 1024);
+				die $! if (!defined $n || $n == 0);
+				$local_out = substr($local_out, $n);
+			}
+		}
+	}
+}
+
+
+# Must be length(data) <= 125 !
+sub pack_ws
+{
+	my $data = shift;
+
+	# FIN + opcode (binary frame), MASK=1 + len, 4byte MASK-key of 0
+	my $op = 128 + 2;
+	my $l = length($data);
+	print "DBG: -> op=$op len=$l\n";
+
+	my $frame = pack "C6", $op, 128 + $l, 0, 0, 0, 0;
+	return $frame.$data;
+}
+
+
+sub unpack_ws
+{
+	my $dataref = shift;
+
+	my ($op, $l) = unpack("CC", $$dataref);
+	my $fl = length($$dataref);
+	print "DBG: <- op=$op len=$l framelen=$fl\n";
+
+	if ($op - 128 != 2) {
+		print "DBG: Not a bin frame\n";
+		logdump($$dataref);
+		$$dataref = "";
+		return "";
+	}
+
+	my $ret = "";
+
+	# MASK bit set?
+	if ($l >= 128) {
+		print "DBG: MASK bit set\n";
+		$ret = substr($$dataref, 6, $l);
+		$$dataref = substr($$dataref, 6 + $l);
+	} else {
+		$ret = substr($$dataref, 2, $l);
+		$$dataref = substr($$dataref, 2 + $l);
+	}
+
+	return $ret;
+}
+
+
+sub ping_ws
+{
+	my $data = "PING1";
+	if ($cfg->{mode} == 2) {
+		$data = "PING2";
+	}
+	my $frame = pack "C6", 128 + 9, 128 + length($data), 0, 0, 0, 0;
+	return $frame.$data;
+}
+
+
+sub logdump
+{
+	my $data = shift;
+	print "DMP: ", unpack("H*", $data), "\n";
+	for ($i = 0; $i < length($data); $i++) {
+		printf("%c ", ord(substr($data, $i, 1)));
+	}
+	printf "\n";
+}
+
+
+sub get_rnd_id
+{
+	my $rnd = undef;
+	open(R, "</dev/urandom") or die $!;
+	sysread(R, $rnd, 16);
+	close(R);
+	return unpack("H*", $rnd);
+#	return "00000000000000000000000000000000";
+}
+
+
+# return a tunnel ID based on Epoch in hours granularity
+sub get_time_id
+{
+	return Digest->new("MD5")->add(int(time/3600))->add($HASHSECRET)->hexdigest();
+}
+
+sub banner
+{
+	print<<EOB;
+
+ ███████                            ███████                    ██
+░██░░░░██                          ░██░░░░██                  ░██
+░██   ░██  ██████    ██████  ██████░██   ░██  ██████  ██████ ██████
+░███████  ░░░░░░██  ██░░░░  ██░░░░ ░███████  ██░░░░██░░██░░█░░░██░
+░██░░░░    ███████ ░░█████ ░░█████ ░██░░░░  ░██   ░██ ░██ ░   ░██
+░██       ██░░░░██  ░░░░░██ ░░░░░██░██      ░██   ░██ ░██     ░██
+░██      ░░████████ ██████  ██████ ░██      ░░██████ ░███     ░░██
+░░        ░░░░░░░░ ░░░░░░  ░░░░░░  ░░        ░░░░░░  ░░░       ░░
+
+                   CTAPv2.2 HybridTransport Tunneling
+
+EOB
+
+}
+
+
+sub usage
+{
+	print "\npassport -new <port>\npassport -connect <host> <port> <routing-id> <tunnel-id>\n\nor\n\npassport -tnew <port>\npassport -tconnect <host> <port>\n\n";
+	exit;
+}
+
+
+
