@@ -106,6 +106,10 @@ WebSocket once that the other end succeeded with their `-tconnect`
 at the same time (obtaining the routing IDs can take ~10s).
 Make sure you succeed within OpenSSH timeouts and all necessary terminals.
 
+It is required that *Inside* and *Outside* have synchronized clocks
+(Epoch) in hour-granularity when automatic mode is used, in order to derive
+equal tunnel IDs.
+
 
 Was there any Bug Bounty?
 -------------------------
