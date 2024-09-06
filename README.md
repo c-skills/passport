@@ -1,7 +1,9 @@
 PassPort
 ========
 
-![screenshot](https://github.com/c-skills/passport/blob/master/passport.jpg)
+<p align="center">
+<img src="https://github.com/c-skills/passport/blob/master/passport.jpg"/>
+</p>
 
 Forwarding TCP ports through [Passkey](https://fidoalliance.org/passkeys/) servers to bypass censorship.
 
