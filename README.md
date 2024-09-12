@@ -1,5 +1,5 @@
-PassPort
-========
+PassPort, please!
+=================
 
 <p align="center">
 <img src="https://github.com/c-skills/passport/blob/master/passport.jpg"/>
@@ -17,7 +17,7 @@ Do not send me requests for improvements or ask for any help in "making it work"
 Introduction
 ------------
 
-Recently, the new FIDO standards that incorporate WebAuthn and [CTAP](https://fidoalliance.org/specs/fido-v2.2-rd-20230321/fido-client-to-authenticator-protocol-v2.2-rd-20230321.html#sctn-hybrid) to form *Passkeys* were
+Recently, the new FIDO standards that incorporate [WebAuthn](https://www.w3.org/TR/webauthn-2/) and [CTAP](https://fidoalliance.org/specs/fido-v2.2-rd-20230321/fido-client-to-authenticator-protocol-v2.2-rd-20230321.html#sctn-hybrid) to form *Passkeys* were
 widely marketed as *the* password replacement. A quite new chapter about *Hybrid Transports* allows
 to use QR codes with the authenticator (in this case most likely your smart phone) to authenticate
 against a service in that authenticator and client platform (in this case most likely your browser)
@@ -27,9 +27,9 @@ open a tunnel to send PDUs back and forth in a similar way that they would trave
 A public CTAP tunnel server?
 ----------------------------
 
-Yes. A high reputation server IP that allows you to tunnel binary data and it speaks WebSockets as per standard.
+Yes. A high reputation server IP that allows you to tunnel binary data and it speaks [WebSockets](https://www.rfc-editor.org/rfc/rfc6455.html) as per standard.
 
-The whole idea is actually very simple and best understood with a graphic:
+The whole idea is very simple and best understood with a graphic:
 
 ```
 
@@ -37,9 +37,9 @@ The whole idea is actually very simple and best understood with a graphic:
 
 
 
-   SSH Server                                                   "google.com"
+   SSH Server                                                    "google.com"
 
-[ 127.0.0.1:22 ] <---- passport -tconnect 127.0.0.1 22 -----> | cable.ua5v.com  | <--+
+[ 127.0.0.1:22 ] <---- passport -tconnect 127.0.0.1 22 -----> | cable.ua5v.com | <---+
                                                                                      |
                                                                                      |
                                                                                      |
@@ -49,9 +49,14 @@ The whole idea is actually very simple and best understood with a graphic:
                                                                                      |
                     Inside World [ "Censored Network" ]                              |
                                                                                      |
-        local port                                                                   |
+ local port from passport                                                            |
                                                                                      |
-     [ 127.0.0.1:1234 ] <----> passport -tnew   -------------------------------------+
+     [ 127.0.0.1:1234 ] <---- passport -tnew 1234  ----------------------------------+
+            ^
+            |
+            |
+
+  ssh -D 5555 127.0.0.1 -p 1234
 
 ```
 
@@ -76,51 +81,62 @@ should they do that?
 
 * The IP is in Googles IP-range, the same IP you get when you browse "google.com"
   or lets just say "google.hk". Yes, if the entire Google net-range is just dropped,
-  this will not work, unless you have other existing vendors which are white listed ...
+  this will not work, unless you have other existing vendors which are white listed.
 
 * Domain fronting works fine. This means you can connect to the IP that is reachable
   and put any legit looking SNI into the TLS client hello, e.g. "google.hk" so that
   censorship observers can not distinguish a web-search on a presumed self-censored
-  site from a tunnel connections. Within the request, the `Host: cable.ua5v.com` is found.
+  site from a tunnel connection. Within the request, the `Host: cable.ua5v.com` is found.
 
+*Got root?*
+<p align="center">
+<a href="https://github.com/c-skills/welcome">
+<img src="https://github.com/c-skills/welcome/blob/master/logo.jpg"/>
+</a>
+</p>
 
 
 Some more details
 -----------------
 
-There are two modes of operation. Both are artificially throtteld so to demo that the idea
+There are two modes of operation. Both are artificially throttled so to demo that the idea
 works but to not consume real bandwidth or server power.
 
-In manual mode via `-new` you have to pass the obtained routing-ID (check the standard) to the
-client *Outside* so he can `-connect` to the *Inside* tunnel endpoint.
+In manual mode via `-new` you have to pass the obtained tunnel- and routing-ID (check the standard) to
+the client *Outside* so he can `-connect` to the *Inside* tunnel endpoint.
 
 In automatic mode, `-tconnect` will obtain all possible routing-IDs (do not ask me why they
 are predictable for a time-frame of like 24h and have 1/6 chance to succeed), keep it
 and try until success without needing to establish a second channel between *Inside* and *Outside*.
 
 As the tunnel server shuts down both connections after 60s, automatic mode will reconnect
-and try the predicatble IDs until a new tunnel is established, *leaving the existing SSH
+and try the predictable IDs until a new tunnel is established, *leaving the existing SSH
 connection alive and working.*
 
 For testing, when a `-tnew` is started, it expects the connection on
 localhost at the given port first, which it then forwards across the
 WebSocket once that the other end succeeded with their `-tconnect`
 at the same time (obtaining the routing IDs can take ~10s).
-Make sure you succeed within OpenSSH timeouts and all necessary terminals.
+Make sure you succeed within *OpenSSH* timeouts and all necessary terminals.
 
 It is required that *Inside* and *Outside* have synchronized clocks
 (Epoch) in hour-granularity when automatic mode is used, in order to derive
-equal tunnel IDs.
+equal tunnel IDs. When there are longer sessions and hours wrap differently
+on both ends, there is a problem. So the better the time sync, the more stable
+the tunnel. Granularity can be tuned in `get_time_id()`.
+
+Make sure you also visit the projects of [our](https://thc.org) [friends](https://nullsecurity.net) if you are into privacy.
 
 
 Was there any Bug Bounty?
 -------------------------
 
 No. I did not even bother to ask for it, as IMHO there is actually no bug. Everything works
-by the standard. I cannot imagine what could be different when the standard explicitely allows
-or even endorses WebSocket connections through high reputation IP ranges. I am thankful
-this Hybrid Transport was added and my reason to publish it was to make it more widely
-known. I hope that more large vendors are added in future so to make it impossible for
-censorship to block it all without also disabling their own sessions.
-
+by the standard. I cannot imagine what could be different when the standard explicitly allows
+or even endorses WebSocket connections through high reputation IP ranges. Theoretically the standard
+enforces a proximity proof of both tunnel ends and a [Noise](https://noiseprotocol.org/) handshake. However, as we control
+both ends, this is the part that we "opt out" and there is nothing that can be done about it if
+both parties agree on it. I am thankful this *Hybrid Transport* was added and my reason to publish it was
+to make it more widely known. I hope that more large vendors are added in future so to make it impossible
+for censorship to block it all without also disabling their own sessions.
 

@@ -1,5 +1,6 @@
 #!/usr/bin/perl -w
 
+# Write more Perl code! You gotta love it!
 
 #
 # This file is part of passport.
@@ -172,6 +173,7 @@ EON
 
 		if (!defined $cfg->{routing_id}) {
 			$peer->close();
+			# can be optimized:
 			sleep 1;
 			next;
 		}
@@ -249,6 +251,7 @@ EOC
 
 			if ($reply !~ /^HTTP\/1\.1 101 Switching Protocols\r\n/) {
 				$peer->close();
+				# can be optimized
 				sleep 1;
 				next;
 			}
@@ -271,7 +274,7 @@ EOC
 # obtain the current set of routing IDs
 sub get_rids
 {
-	print "[**] Obtaining valid routing IDs ...\n";
+	print "[**] Obtaining $NUM_RIDS routing IDs, this can take a while ...\n\n";
 
 	for (;scalar(keys %{$cfg->{routing_id_set}}) < $NUM_RIDS;) {
 		my $tid = get_rnd_id();
@@ -295,7 +298,7 @@ EON
 			SSL_hostname => $SNI
 		) or die $!;
 
-		print ">>>\n", $new_req;
+		#print ">>>\n", $new_req;
 		print $peer $new_req;
 
 		my $reply = "";
@@ -303,19 +306,26 @@ EON
 			$reply .= <$peer>;
 		}
 
-		print "<<<\n", $reply;
+		#print "<<<\n", $reply;
 
 		$reply =~ /X-Cable-Routing-Id:\s+([a-fA-F0-9]+)/;
 		my $rid = $1;
 
 		$peer->close();
 
-		next if (!defined $rid);
+		if (!defined $rid) {
+			print "[-] No routing ID.\n";
+			next;
+		}
 
-		print "[+] New Routing-ID: $rid\n";
+		if (!defined $cfg->{routing_id_set}->{$rid}) {
+			print "[+] Got  new  Routing-ID: $rid\n";
+			$cfg->{routing_id_set}->{$rid} = 1;
+		} else {
+			print "[.] Got known Routing-ID: $rid\n";
+		}
 
-		$cfg->{routing_id_set}->{$rid} = 1;
-
+		# leave this as it is, can't be optimized
 		sleep 1;
 	}
 }
@@ -341,7 +351,9 @@ sub mux
 
 	for (;;) {
 
-		last if ($end_acked);
+		# both ends may started "CQUIT", so the last thing we sent was either
+		# "CQACK" or "CQUIT", but the @peer_out queue must be empty in either case
+		last if ($end_acked && scalar @$peer_out == 0);
 		last if ($end_rcved && scalar @$peer_out == 0);
 
 		# wset
@@ -351,7 +363,8 @@ sub mux
 
 		my $nready = select(my $rset = $vec1, my $wset = $vec2, undef, 1);
 
-		if (!$end_signalled && ($TX > $MAX_TX || (time - $cfg->{start_time}) > ($TUNNEL_TIME - 5))) {
+		if (!$end_signalled && !$end_rcved &&
+		    ($TX > $MAX_TX || (time - $cfg->{start_time}) > ($TUNNEL_TIME - 5))) {
 			if ($TX > $MAX_TX) {
 				print "DBG: Max amount of TX bytes per session reached.\n";
 			} else {
@@ -395,8 +408,8 @@ sub mux
 							next;
 						} elsif ($pkt =~ /^CQACK/) {
 							$end_acked = 1;
-							print "DBG: End ACK rcved. Leaving loop.\n";
-							last;
+							print "DBG: End ACK rcved.\n";
+							next;
 						}
 					}
 
@@ -413,7 +426,7 @@ sub mux
 		    !$end_signalled && !$end_rcved &&
 		    vec($rset, fileno($fd), 1) == 1) {
 
-			my $n = sysread($fd, my $buf, 124);
+			my $n = sysread($fd, my $buf, 124);		# do not change the 124
 			if (defined $n) {
 				die $! if ($n == 0);			# hard error if local socket closes
 				push @$peer_out, pack_data_ws($buf);
@@ -451,6 +464,8 @@ sub pack_data_ws
 	my $op = 128 + 2;
 	my $l = length($data) + 1;
 
+	die "Internal pack error: datalen > 124" if ($l > 125);
+
 	$TX += $l;
 	$GTX += $l;
 	print "DBG: -> op=$op len=$l TX=$TX/$GTX D\n";
@@ -461,46 +476,6 @@ sub pack_data_ws
 }
 
 
-sub unpack_ws
-{
-	my $dataref = shift;
-
-	my ($op, $l) = unpack("CC", $$dataref);
-	my $fl = length($$dataref);
-
-	$RX += $l;
-	$GRX += $l;
-	print "DBG: <- op=$op len=$l framelen=$fl RX=$RX/$GRX\n";
-
-	if ($op - 128 != 2) {
-		print "DBG: Not a bin frame\n";
-		logdump($$dataref);
-		$$dataref = "";
-		return "";
-	}
-
-	my $ret = "";
-
-	# MASK bit set?
-	if ($l >= 128) {
-		print "DBG: MASK bit set\n";
-		$ret = substr($$dataref, 6, $l);
-		$$dataref = substr($$dataref, 6 + $l);
-	} else {
-		die "Internal error: pkt size > 125" if ($l > 125);
-
-		if (2 + $l <= length($$dataref)) {
-			$ret = substr($$dataref, 2, $l);
-			$$dataref = substr($$dataref, 2 + $l);
-		} else {
-			print "DBG: hangover pkt\n";
-		}
-	}
-
-	return $ret;
-}
-
-
 sub pack_cmd_ws
 {
 	my $cmd = shift;
@@ -508,12 +483,53 @@ sub pack_cmd_ws
 	# FIN + opcode (binary frame), MASK=1 + len, 4byte MASK-key of 0
 	my $op = 128 + 2;
 	my $l = length($cmd) + 1;
+
+	$TX += $l;
+	$GTX += $l;
 	print "DBG: -> op=$op len=$l TX=$TX/$GTX C\n";
-	#$TX += 2 + $l;
 
 	my $frame = pack "C6", $op, 128 + $l, 0, 0, 0, 0;
 
 	return $frame."C".$cmd;		# C for cmd
+}
+
+
+sub unpack_ws
+{
+	my $dataref = shift;
+
+	my ($op, $l) = unpack("CC", $$dataref);
+	my $fl = length($$dataref);
+
+	if ($op - 128 != 2) {
+		print "DBG: Not a bin frame op=$op len=$l\n";
+		logdump($$dataref);
+		$$dataref = "";
+		return "";
+	}
+
+	my ($ret, $off) = ("", 2);
+
+	# MASK bit set?
+	if ($l >= 128) {
+		print "DBG: MASK bit set\n";
+		$off = 6;
+	}
+	die "Internal unpack error: datalen > 125" if ($l > 125);
+
+	if ($off + $l <= length($$dataref)) {
+
+		$RX += $l;
+		$GRX += $l;
+		print "DBG: <- op=$op len=$l framelen=$fl RX=$RX/$GRX\n";
+
+		$ret = substr($$dataref, $off, $l);
+		$$dataref = substr($$dataref, $off + $l);
+	} else {
+		print "DBG: hangover pkt\n";
+	}
+
+	return $ret;
 }
 
 
