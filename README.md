@@ -76,7 +76,7 @@ and forwards it across the WebSocket connection to an outside SSH server. So you
 can SSH from behind a censorship to a "free" SSH server and then use it to
 forward web traffic as usual.
 
-This ofcorse requires the censor to allow connections to `cable.ua5v.com`. Why
+This of course requires the censor to allow connections to `cable.ua5v.com`. Why
 should they do that?
 
 * The IP is in Googles IP-range, the same IP you get when you browse "google.com"

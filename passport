@@ -38,7 +38,7 @@ use IO::Socket::SSL;
 my $TUNSERV_PEER	= 'google.com';		# IP or FQDN
 my $TUNSERV		= 'cable.ua5v.com';	# what gets into "Host:" header
 my $SNI			= 'google.hk';
-my $TUNNEL_TIME		= 60;			# When will the tunnel be closed by remote (in seconds)
+my $TUNNEL_TIME		= 30;			# When will the tunnel be closed by remote (in seconds)
 my $MAX_TX		= 500000;		# maximum amount of TX bytes per WS connect
 my $NUM_RIDS		= 6;			# amount of predictable routing IDs to obtain
 my $HASHSECRET		= 'mysecret';		# Make the time based tunnel ID a bit more unpredictable
