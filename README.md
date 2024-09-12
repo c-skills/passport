@@ -88,13 +88,11 @@ should they do that?
   censorship observers can not distinguish a web-search on a presumed self-censored
   site from a tunnel connection. Within the request, the `Host: cable.ua5v.com` is found.
 
-*Got root?*
 <p align="center">
 <a href="https://github.com/c-skills/welcome">
 <img src="https://github.com/c-skills/welcome/blob/master/logo.jpg"/>
 </a>
 </p>
-
 
 Some more details
 -----------------
